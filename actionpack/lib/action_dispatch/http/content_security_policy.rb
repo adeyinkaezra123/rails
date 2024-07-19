@@ -24,9 +24,30 @@ module ActionDispatch # :nodoc:
   #
   #       # Specify URI for violation reports
   #       policy.report_uri "/csp-violation-report-endpoint"
+  #       policy.report_to 'default', -> {
+  #         {
+  #           default: {
+  #             urls: ['/csp-violation-report-endpoint', 'https://example.com/csp-violation-report'],
+  #             max_age: 30.minutes,
+  #             include_subdomains: true
+  #           },
+  #           group_2: 'https://example.com/hpkp-reports'
+  #         }
+  #       }
   #     end
+
   class ContentSecurityPolicy
     class InvalidDirectiveError < StandardError
+    end
+
+    class ReportingEndpointError < StandardError
+      def initialize(message, provided_data = nil)
+        if provided_data
+          super("#{message} Provided data: #{provided_data.inspect}")
+        else
+          super(message)
+        end
+      end
     end
 
     class Middleware
@@ -49,6 +70,8 @@ module ActionDispatch # :nodoc:
           nonce = request.content_security_policy_nonce
           nonce_directives = request.content_security_policy_nonce_directives
           context = request.controller_instance || request
+
+          add_reporting_headers(headers, policy)
           headers[header_name(request)] = policy.build(context, nonce, nonce_directives)
         end
 
@@ -56,6 +79,16 @@ module ActionDispatch # :nodoc:
       end
 
       private
+        def add_reporting_headers(headers, policy)
+          if policy.report_directives["report-to"].present?
+            headers[ActionDispatch::Constants::REPORT_TO] = policy.report_directives["report-to"]
+          end
+
+          if policy.report_directives["reporting-endpoints"].present?
+            headers[ActionDispatch::Constants::REPORTING_ENDPOINT] = policy.report_directives["reporting-endpoints"]
+          end
+        end
+
         def header_name(request)
           if request.content_security_policy_report_only
             ActionDispatch::Constants::CONTENT_SECURITY_POLICY_REPORT_ONLY
@@ -76,6 +109,8 @@ module ActionDispatch # :nodoc:
       NONCE_GENERATOR = "action_dispatch.content_security_policy_nonce_generator"
       NONCE = "action_dispatch.content_security_policy_nonce"
       NONCE_DIRECTIVES = "action_dispatch.content_security_policy_nonce_directives"
+      REPORTING_ENDPOINT = "action_dispatch.reporting_endpoints"
+      REPORT_TO = "action_dispatch.report_to"
 
       def content_security_policy
         get_header(POLICY)
@@ -175,10 +210,11 @@ module ActionDispatch # :nodoc:
 
     private_constant :MAPPINGS, :DIRECTIVES, :DEFAULT_NONCE_DIRECTIVES
 
-    attr_reader :directives
+    attr_reader :directives, :report_directives
 
     def initialize
       @directives = {}
+      @report_directives = {}
       yield self if block_given?
     end
 
@@ -237,6 +273,63 @@ module ActionDispatch # :nodoc:
     #
     def report_uri(uri)
       @directives["report-uri"] = [uri]
+    end
+
+    # Send CSP Violation Reports with the [ReportingApi](https://developer.mozilla.org/en-US/docs/Web/API/Reporting_API)
+    # through the [Report-To](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Security-Policy/report-to) and
+    # [Reporting-Endpoints](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Reporting-Endpoints) headers.
+    #
+    # Violation reports will be sent to the specified URI. The group parameter must be a valid URI string that will be used as the group name:
+    #   policy.report_to "/csp-violation-report-endpoint"
+    #
+    # Send reports to a single endpoint:
+    #   policy.report_uri "/csp-violation-report-endpoint"
+    #
+    # Send reports to multiple endpoints:
+    #   policy.report_uri "group_1", -> {
+    #     {
+    #       group_1: {
+    #         urls: ["/csp-violation-report-endpoint", "https://example.com/csp-report-endpoint"],
+    #         max_age: 30.minutes,
+    #         include_subdomains: true
+    #       },
+    #
+    #       # The Reporting API is not limited to CSP violations.
+    #       # Any reports regarding problems with the browser will
+    #       # be sent to the specified endpoint.
+    #
+    #       group_2: "https://example.com/deprecation-reports"
+    #     }
+    #   }
+
+    def report_to(group, endpoints = nil)
+      validate_reporting_group_name(group)
+
+      begin
+        uri = URI.parse(group)
+        group_name = uri.path&.parameterize(separator: "-")
+      rescue URI::InvalidURIError
+        raise ReportingEndpointError.new("Invalid CSP group name URI format", group)
+      end
+
+      reporting_endpoints = []
+      report_to_endpoints = []
+
+      case endpoints
+      when nil
+        reporting_endpoints << "#{group_name}=\"/#{group}\""
+      when String, Symbol
+        report_uri(endpoints.to_s)
+        reporting_endpoints << "#{group_name}=\"#{endpoints}\""
+      when Proc
+        build_report_directives(endpoints, report_to_endpoints, reporting_endpoints)
+      else
+        raise ReportingEndpointError.new("Invalid CSP reporting endpoint type", endpoints)
+      end
+
+      @directives["report-to"] = [group_name]
+      @report_directives["report-to"] = report_to_endpoints
+      @report_directives["reporting-endpoints"] = reporting_endpoints
     end
 
     # Specify asset types for which [Subresource Integrity](https://developer.mozilla.org/en-US/docs/Web/Security/Subresource_Integrity) is required:
@@ -373,6 +466,49 @@ module ActionDispatch # :nodoc:
 
       def nonce_directive?(directive, nonce_directives)
         nonce_directives.include?(directive)
+      end
+
+      def build_report_directives(proc, report_to_endpoints, reporting_endpoints)
+        csp_report_endpoints = validate_reporting_endpoints_proc(proc)
+        csp_report_endpoints.each do |key, endpoint|
+          process_reporting_endpoint(key, endpoint, report_to_endpoints, reporting_endpoints)
+        end
+      end
+
+      def process_reporting_endpoint(key, endpoint, report_to_endpoints, reporting_endpoints)
+        case endpoint
+        when String
+          report_uri(endpoint)
+          reporting_endpoints << "#{key}=\"#{endpoint}\""
+        when Hash
+          process_reporting_endpoint_hash(key, endpoint, report_to_endpoints)
+        else
+          raise ReportingEndpointError.new("Invalid CSP reporting endpoint type", endpoint)
+        end
+      end
+
+      def process_reporting_endpoint_hash(key, endpoint, report_to_endpoints)
+        urls = endpoint.delete(:urls) || []
+        endpoint[:group] = key
+        endpoint[:endpoints] = urls.filter_map { |url| { url: url } unless url.nil? }
+        report_to_endpoints << endpoint.to_json
+      end
+
+      def validate_reporting_endpoints_proc(proc)
+        csp_report_endpoints = proc.call
+        unless csp_report_endpoints.is_a?(Hash)
+          raise ReportingEndpointError.new("CSP reporting endpoints Proc must return a Hash", csp_report_endpoints)
+        end
+        csp_report_endpoints
+      end
+
+      def validate_reporting_group_name(group)
+        unless group.is_a?(String)
+          raise ReportingEndpointError.new("CSP group name must be a String", group)
+        end
+        if group.strip.empty?
+          raise ReportingEndpointError.new("CSP group name cannot be empty", group)
+        end
       end
   end
 end
