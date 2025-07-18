@@ -1451,15 +1451,15 @@ Alternatively, you can pass a proc to define multiple endpoints that share the s
 
 ```ruby
 Rails.application.config.content_security_policy do |policy|
-  policy.report_to 'default', -> {
+  policy.report_to "default", -> {
     {
       default: {
-        urls: ['/csp-violation-report-endpoint', 'https://example.com/csp-violation-report'],
+        urls: ["/csp-violation-report-endpoint", "https://example.com/csp-violation-report"],
         max_age: 30.minutes,
         include_subdomains: true
       },
 
-      group_2: 'https://example.com/hpkp-reports'
+      group_2: "https://example.com/hpkp-reports"
     }
   }
 end
@@ -1486,9 +1486,8 @@ end
 [`Content-Security-Policy-Report-Only`]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Security-Policy-Report-Only
 [`report-uri`]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Security-Policy/report-uri
 [`report-to`]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Security-Policy/report-to
-[`out-of-band`]: https://en.wikipedia.org/wiki/Out-of-band_datahttps://en.wikipedia.org/wiki/Out-of-band_data
 [`Reporting API`]: https://developer.mozilla.org/en-US/docs/Web/API/Reporting_API
-[`Report-To`]: https://developer.mozilla.org/en-US/docs/Web/API/Reporting_API
+[`Report-To`]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Report-To
 [`Reporting-Endpoints`]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Reporting-Endpoints
 
 #### Adding a Nonce

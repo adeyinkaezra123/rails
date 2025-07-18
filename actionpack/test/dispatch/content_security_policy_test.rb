@@ -291,7 +291,7 @@ class ContentSecurityPolicyTest < ActiveSupport::TestCase
         }
       }
     end
-    assert_match "Invalid CSP reporting endpoint type", error.message
+    assert_match "Invalid CSP reporting endpoint keys", error.message
 
     # Test invalid URI format
     error = assert_raises(ActionDispatch::ContentSecurityPolicy::ReportingEndpointError) do
@@ -465,8 +465,15 @@ class ContentSecurityPolicyMiddlewareTest < ActiveSupport::TestCase
       ActionDispatch::ContentSecurityPolicy::Middleware.new(Rack::Lint.new(app))
     ).call(@env)
 
-    assert_includes headers[ActionDispatch::Constants::REPORT_TO], "default"
-    assert_includes headers[ActionDispatch::Constants::REPORTING_ENDPOINT], "default=\"/csp-violation-report-endpoint\""
+    # The REPORT_TO header should contain JSON data, not just the group name
+    report_to_header = headers[ActionDispatch::Constants::REPORT_TO]
+    assert_not_nil report_to_header, "REPORT_TO header should be present"
+    assert_match(/"group":"default"/, report_to_header, "REPORT_TO header should contain the group name")
+
+    # The REPORTING_ENDPOINT header should contain the endpoint mapping
+    reporting_endpoint_header = headers[ActionDispatch::Constants::REPORTING_ENDPOINT]
+    assert_not_nil reporting_endpoint_header, "REPORTING_ENDPOINT header should be present"
+    assert_match(/default="\/csp-violation-report-endpoint"/, reporting_endpoint_header, "REPORTING_ENDPOINT header should contain the endpoint mapping")
   end
 end
 

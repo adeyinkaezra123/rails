@@ -4,6 +4,7 @@
 
 require "active_support/core_ext/object/deep_dup"
 require "active_support/core_ext/array/wrap"
+require "json"
 
 module ActionDispatch # :nodoc:
   # # Action Dispatch Content Security Policy
@@ -35,7 +36,6 @@ module ActionDispatch # :nodoc:
   #         }
   #       }
   #     end
-
   class ContentSecurityPolicy
     class InvalidDirectiveError < StandardError
     end
@@ -43,7 +43,7 @@ module ActionDispatch # :nodoc:
     class ReportingEndpointError < StandardError
       def initialize(message, provided_data = nil)
         if provided_data
-          super("#{message} Provided data: #{provided_data.inspect}")
+          super("#{message}, provided data: #{provided_data.inspect}")
         else
           super(message)
         end
@@ -81,11 +81,13 @@ module ActionDispatch # :nodoc:
       private
         def add_reporting_headers(headers, policy)
           if policy.report_directives["report-to"].present?
-            headers[ActionDispatch::Constants::REPORT_TO] = policy.report_directives["report-to"]
+            # Report-To header expects a JSON array per W3C spec
+            headers[ActionDispatch::Constants::REPORT_TO] = "[#{policy.report_directives["report-to"].join(", ")}]"
           end
 
           if policy.report_directives["reporting-endpoints"].present?
-            headers[ActionDispatch::Constants::REPORTING_ENDPOINT] = policy.report_directives["reporting-endpoints"]
+            # Reporting-Endpoints header expects name="url" pairs per W3C spec
+            headers[ActionDispatch::Constants::REPORTING_ENDPOINT] = policy.report_directives["reporting-endpoints"].join(", ")
           end
         end
 
@@ -220,6 +222,7 @@ module ActionDispatch # :nodoc:
 
     def initialize_copy(other)
       @directives = other.directives.deep_dup
+      @report_directives = other.report_directives.deep_dup
     end
 
     DIRECTIVES.each do |name, directive|
@@ -301,16 +304,12 @@ module ActionDispatch # :nodoc:
     #       group_2: "https://example.com/deprecation-reports"
     #     }
     #   }
-
     def report_to(group, endpoints = nil)
       validate_reporting_group_name(group)
 
-      begin
-        uri = URI.parse(group)
-        group_name = uri.path&.parameterize(separator: "-")
-      rescue URI::InvalidURIError
-        raise ReportingEndpointError.new("Invalid CSP group name URI format", group)
-      end
+      # W3C spec requires group names to be simple ASCII strings
+      # Sanitize the group name by removing leading slashes and making it URL-safe
+      group_name = sanitize_group_name(group)
 
       reporting_endpoints = []
       report_to_endpoints = []
@@ -481,17 +480,41 @@ module ActionDispatch # :nodoc:
           report_uri(endpoint)
           reporting_endpoints << "#{key}=\"#{endpoint}\""
         when Hash
-          process_reporting_endpoint_hash(key, endpoint, report_to_endpoints)
+          process_reporting_endpoint_hash(key, endpoint, report_to_endpoints, reporting_endpoints)
         else
           raise ReportingEndpointError.new("Invalid CSP reporting endpoint type", endpoint)
         end
       end
 
-      def process_reporting_endpoint_hash(key, endpoint, report_to_endpoints)
-        urls = endpoint.delete(:urls) || []
-        endpoint[:group] = key
-        endpoint[:endpoints] = urls.filter_map { |url| { url: url } unless url.nil? }
-        report_to_endpoints << endpoint.to_json
+      def process_reporting_endpoint_hash(key, endpoint, report_to_endpoints, reporting_endpoints)
+        # Create a copy to avoid modifying the original
+        endpoint_data = endpoint.dup
+        urls = endpoint_data.delete(:urls) || []
+
+        # Build W3C-compliant endpoint structure
+        report_to_data = {
+          group: key,
+          max_age: endpoint_data[:max_age] || 86400,
+          endpoints: urls.filter_map { |url| { url: url } unless url.nil? }
+        }
+
+        # Add optional fields if present
+        report_to_data[:include_subdomains] = endpoint_data[:include_subdomains] if endpoint_data.key?(:include_subdomains)
+
+        # Validate only expected W3C endpoint keys are present
+        valid_keys = [:urls, :max_age, :include_subdomains]
+        invalid_keys = endpoint_data.keys - valid_keys
+        if invalid_keys.any?
+          raise ReportingEndpointError.new("Invalid CSP reporting endpoint keys. Valid keys: #{valid_keys.join(', ')}", invalid_keys)
+        end
+
+        report_to_endpoints << JSON.generate(report_to_data)
+
+        # Add reporting endpoint mapping for each URL
+        urls.each do |url|
+          next if url.nil?
+          reporting_endpoints << "#{key}=\"#{url}\""
+        end
       end
 
       def validate_reporting_endpoints_proc(proc)
@@ -509,6 +532,23 @@ module ActionDispatch # :nodoc:
         if group.strip.empty?
           raise ReportingEndpointError.new("CSP group name cannot be empty", group)
         end
+
+        # Validate URI format for group names that contain URI-like patterns
+        if group.include?("://")
+          begin
+            URI.parse(group)
+          rescue URI::InvalidURIError
+            raise ReportingEndpointError.new("Invalid CSP group name URI format", group)
+          end
+        end
+      end
+
+      def sanitize_group_name(group)
+        sanitized = group.to_s.gsub(/^\/+/, "").downcase
+        # Replace non-alphanumeric characters (except underscores and hyphens) with hyphens
+        sanitized = sanitized.gsub(/[^a-z0-9_-]+/, "-")
+        # Remove leading/trailing hyphens
+        sanitized.gsub(/^-+|-+$/, "")
       end
   end
 end

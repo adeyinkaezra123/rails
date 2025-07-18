@@ -13,6 +13,7 @@
       }
     }
     ```
+
     *Ezra Adeyinka*
 
 *   Allow to open source file with a crash from the browser.
